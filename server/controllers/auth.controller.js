@@ -147,15 +147,15 @@ export const register = async (req, res) => {
       emailVerified: false,
     });
 
-    // building verification link
-    const baseURL = process.env.CLIENT_URL; // using client_url from the env variables
+    // building verification link — prefer backend URL so the link hits the API
+    const baseURL = process.env.SERVER_URL || process.env.CLIENT_URL;
     if (!baseURL) {
       console.error(
-        "CLIENT_URL is not defined or loaded properly from the environment variables",
+        "SERVER_URL or CLIENT_URL is not defined or loaded properly from the environment variables",
       );
       return res
         .status(500)
-        .json({ message: "Internal server error: CLIENT_URL not configured" });
+        .json({ message: "Internal server error: SERVER_URL not configured" });
     }
     const verificationLink = `${baseURL}/api/v1/auth/verify-email?token=${emailVerificationToken}`; // creating the verification link to be sent in the email
 

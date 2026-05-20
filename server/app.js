@@ -11,6 +11,7 @@ if (process.env.NODE_ENV === "production") {
 }
 app.use(express.json());
 app.use(cookieParser());
+app.set("trust proxy", 1);
 
 const allowedOrigins = [
   process.env.CLIENT_URL,
