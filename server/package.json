@@ -1,0 +1,37 @@
+{
+  "name": "server",
+  "type": "module",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "test": "node -e \"import('./app.js').then(() => console.log('app imports successfully')).catch((error) => { console.error(error); process.exit(1); })\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.33.3",
+  "dependencies": {
+    "@socket.io/redis-adapter": "^8.3.0",
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "express-rate-limit": "^6.7.0",
+    "joi": "^17.9.2",
+    "jsonwebtoken": "^9.0.0",
+    "mongoose": "^9.6.2",
+    "node-cron": "^4.2.1",
+    "nodemailer": "^6.9.3",
+    "redis": "^5.8.2",
+    "socket.io": "^4.8.3",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.9.1",
+    "nodemon": "^3.1.14"
+  }
+}
