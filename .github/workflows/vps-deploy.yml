@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+
   workflow_dispatch:
 
 jobs:
@@ -26,7 +27,7 @@ jobs:
         working-directory: server
         run: pnpm install --frozen-lockfile
 
-      - name: Run backend import check
+      - name: Run backend tests
         working-directory: server
         run: pnpm test
 
@@ -38,7 +39,7 @@ jobs:
         working-directory: client
         run: npm run build
 
-      - name: Deploy to VPS via SSH
+      - name: Deploy to VPS
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -48,7 +49,13 @@ jobs:
           script_stop: true
           script: |
             set -e
+
             cd "${{ secrets.VPS_APP_DIR }}"
+
             git fetch origin master
             git reset --hard origin/master
-            docker compose up -d --build --remove-orphans
+
+            cd server
+            pnpm install
+
+            pm2 restart all
