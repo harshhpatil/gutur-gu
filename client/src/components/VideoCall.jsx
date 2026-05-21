@@ -1,7 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const ICE_SERVERS = {
-  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    ...(import.meta.env.VITE_TURN_URL
+      ? [
+          {
+            urls: import.meta.env.VITE_TURN_URL,
+            username: import.meta.env.VITE_TURN_USERNAME,
+            credential: import.meta.env.VITE_TURN_CREDENTIAL,
+          },
+        ]
+      : []),
+  ],
 };
 
 const CALL_STATUS = {
@@ -13,18 +24,30 @@ const CALL_STATUS = {
 function VideoCall({ socket, userId }) {
   const [popupData, setPopupData] = useState(null);
   const [callStatus, setCallStatus] = useState(CALL_STATUS.IDLE);
+  const [connectionState, setConnectionState] = useState("idle");
+  const [showEndCallConfirm, setShowEndCallConfirm] = useState(false);
 
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
   const peerConnection = useRef(null);
   const localStreamRef = useRef(null);
+  const remoteStreamRef = useRef(new MediaStream());
   const callStartPromiseRef = useRef(null);
   const pendingIceCandidatesRef = useRef([]);
+
+  const attachRemoteStream = useCallback(() => {
+    if (!remoteVideoRef.current) return;
+
+    remoteVideoRef.current.srcObject = remoteStreamRef.current;
+    remoteVideoRef.current.play().catch(() => {});
+  }, []);
 
   const cleanupCall = useCallback(() => {
     if (peerConnection.current) {
       peerConnection.current.ontrack = null;
       peerConnection.current.onicecandidate = null;
+      peerConnection.current.onconnectionstatechange = null;
+      peerConnection.current.oniceconnectionstatechange = null;
       peerConnection.current.close();
       peerConnection.current = null;
     }
@@ -42,21 +65,26 @@ function VideoCall({ socket, userId }) {
       remoteVideoRef.current.srcObject = null;
     }
 
+    remoteStreamRef.current = new MediaStream();
     callStartPromiseRef.current = null;
     pendingIceCandidatesRef.current = [];
     setPopupData(null);
     setCallStatus(CALL_STATUS.IDLE);
+    setConnectionState("idle");
+    setShowEndCallConfirm(false);
   }, []);
 
   const createPeerConnection = useCallback(() => {
     const connection = new RTCPeerConnection(ICE_SERVERS);
 
     connection.ontrack = (event) => {
-      const [remoteStream] = event.streams;
-
-      if (remoteVideoRef.current && remoteStream) {
-        remoteVideoRef.current.srcObject = remoteStream;
+      if (event.streams?.[0]) {
+        remoteStreamRef.current = event.streams[0];
+      } else if (event.track) {
+        remoteStreamRef.current.addTrack(event.track);
       }
+
+      attachRemoteStream();
     };
 
     connection.onicecandidate = (event) => {
@@ -65,9 +93,26 @@ function VideoCall({ socket, userId }) {
       }
     };
 
+    connection.onconnectionstatechange = () => {
+      setConnectionState(connection.connectionState || "unknown");
+
+      if (connection.connectionState === "failed" || connection.connectionState === "closed") {
+        cleanupCall();
+      }
+    };
+
+    connection.oniceconnectionstatechange = () => {
+      const iceState = connection.iceConnectionState;
+      setConnectionState(iceState || connection.connectionState || "unknown");
+
+      if (iceState === "failed") {
+        cleanupCall();
+      }
+    };
+
     peerConnection.current = connection;
     return connection;
-  }, [socket]);
+  }, [attachRemoteStream, cleanupCall, socket]);
 
   const startMediaAndConnection = useCallback(async () => {
     if (peerConnection.current && localStreamRef.current) {
@@ -98,6 +143,7 @@ function VideoCall({ socket, userId }) {
 
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = localStream;
+        localVideoRef.current.play().catch(() => {});
       }
 
       const connection = peerConnection.current || createPeerConnection();
@@ -164,6 +210,8 @@ function VideoCall({ socket, userId }) {
         scheduleId: data.scheduleId,
       });
       setCallStatus(CALL_STATUS.IDLE);
+      setConnectionState("idle");
+      setShowEndCallConfirm(false);
     };
 
     const handleStartVideo = (data) => {
@@ -257,10 +305,19 @@ function VideoCall({ socket, userId }) {
   };
 
   const handleEndCall = () => {
+    if (!showEndCallConfirm) {
+      setShowEndCallConfirm(true);
+      return;
+    }
+
     socket?.emit("decline_call", {
       scheduleId: popupData?.scheduleId,
     });
     cleanupCall();
+  };
+
+  const cancelEndCall = () => {
+    setShowEndCallConfirm(false);
   };
 
   return (
@@ -292,6 +349,10 @@ function VideoCall({ socket, userId }) {
 
       {callStatus === CALL_STATUS.IN_CALL && (
         <section className="video-call-stage" aria-label="Video call">
+          <div className="video-call-status" aria-live="polite">
+            <span>Connection</span>
+            <strong>{connectionState}</strong>
+          </div>
           <video
             ref={remoteVideoRef}
             className="video-call-remote"
@@ -305,9 +366,23 @@ function VideoCall({ socket, userId }) {
             playsInline
             muted
           />
-          <button type="button" onClick={handleEndCall}>
-            End call
-          </button>
+          {showEndCallConfirm ? (
+            <div className="video-call-confirm">
+              <p>End this call?</p>
+              <div className="video-call-confirm-actions">
+                <button type="button" onClick={handleEndCall}>
+                  End now
+                </button>
+                <button type="button" onClick={cancelEndCall}>
+                  Keep call
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button type="button" onClick={handleEndCall}>
+              End call
+            </button>
+          )}
         </section>
       )}
     </>

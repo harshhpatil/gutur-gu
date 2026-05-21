@@ -56,6 +56,21 @@ jobs:
             git reset --hard origin/master
 
             cd server
+
+            # Ensure pnpm is available in non-interactive SSH sessions.
+            if ! command -v pnpm >/dev/null 2>&1; then
+              if command -v corepack >/dev/null 2>&1; then
+                corepack enable
+                corepack prepare pnpm@latest --activate
+              elif command -v npm >/dev/null 2>&1; then
+                npm install -g pnpm
+              else
+                echo "Neither corepack nor npm is available to install pnpm"
+                exit 1
+              fi
+            fi
+
+            pnpm --version
             pnpm install
 
             pm2 restart all
