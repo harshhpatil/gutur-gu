@@ -19,6 +19,10 @@ const scheduleSchema = new mongoose.Schema(
       required: true,
       // Store in 24-hour format "HH:mm" (e.g., "14:30") so your Node cron job can parse it easily
     },
+    timezone: {
+      type: String,
+      default: process.env.DEFAULT_TIMEZONE || "Asia/Kolkata",
+    },
     isActive: {
       type: Boolean,
       default: true,

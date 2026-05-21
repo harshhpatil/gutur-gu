@@ -147,17 +147,21 @@ export const register = async (req, res) => {
       emailVerified: false,
     });
 
-    // building verification link — prefer backend URL so the link hits the API
-    const baseURL = process.env.SERVER_URL || process.env.CLIENT_URL;
+    // Prefer the frontend so users see the app's verification screen.
+    const baseURL = process.env.FRONTEND_URL || process.env.CLIENT_URL || process.env.SERVER_URL;
     if (!baseURL) {
       console.error(
-        "SERVER_URL or CLIENT_URL is not defined or loaded properly from the environment variables",
+        "FRONTEND_URL, CLIENT_URL or SERVER_URL is not defined or loaded properly from the environment variables",
       );
       return res
         .status(500)
-        .json({ message: "Internal server error: SERVER_URL not configured" });
+        .json({ message: "Internal server error: verification URL not configured" });
     }
-    const verificationLink = `${baseURL}/api/v1/auth/verify-email?token=${emailVerificationToken}`; // creating the verification link to be sent in the email
+    const verificationPath =
+      process.env.FRONTEND_URL || process.env.CLIENT_URL
+        ? "/verify-email"
+        : "/api/v1/auth/verify-email";
+    const verificationLink = `${baseURL}${verificationPath}?token=${emailVerificationToken}`; // creating the verification link to be sent in the email
 
 
     // sending verification email

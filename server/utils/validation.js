@@ -60,3 +60,24 @@ export const resetPasswordSchema = Joi.object({
         "New password must contain uppercase, lowercase, number and special character",
     }),
 });
+
+export const pairingCodeSchema = Joi.object({
+  pairingCode: Joi.string()
+    .pattern(/^\d{6}$/)
+    .required()
+    .messages({
+      "string.pattern.base": "Pairing code must be a 6 digit number",
+    }),
+});
+
+export const scheduleSchema = Joi.object({
+  title: Joi.string().trim().min(1).max(120).required(),
+  time: Joi.string()
+    .pattern(/^([01]\d|2[0-3]):[0-5]\d$/)
+    .required()
+    .messages({
+      "string.pattern.base": "Time must use HH:mm 24-hour format",
+    }),
+  timezone: Joi.string().trim().min(1).max(100).optional(),
+  isActive: Joi.boolean().optional(),
+});

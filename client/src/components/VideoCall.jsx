@@ -10,7 +10,7 @@ const CALL_STATUS = {
   IN_CALL: "in-call",
 };
 
-function VideoCall({ socket }) {
+function VideoCall({ socket, userId }) {
   const [popupData, setPopupData] = useState(null);
   const [callStatus, setCallStatus] = useState(CALL_STATUS.IDLE);
 
@@ -18,6 +18,8 @@ function VideoCall({ socket }) {
   const remoteVideoRef = useRef(null);
   const peerConnection = useRef(null);
   const localStreamRef = useRef(null);
+  const callStartPromiseRef = useRef(null);
+  const pendingIceCandidatesRef = useRef([]);
 
   const cleanupCall = useCallback(() => {
     if (peerConnection.current) {
@@ -40,6 +42,8 @@ function VideoCall({ socket }) {
       remoteVideoRef.current.srcObject = null;
     }
 
+    callStartPromiseRef.current = null;
+    pendingIceCandidatesRef.current = [];
     setPopupData(null);
     setCallStatus(CALL_STATUS.IDLE);
   }, []);
@@ -65,31 +69,76 @@ function VideoCall({ socket }) {
     return connection;
   }, [socket]);
 
+  const startMediaAndConnection = useCallback(async () => {
+    if (peerConnection.current && localStreamRef.current) {
+      return peerConnection.current;
+    }
+
+    if (callStartPromiseRef.current) {
+      return callStartPromiseRef.current;
+    }
+
+    callStartPromiseRef.current = (async () => {
+      setPopupData(null);
+      setCallStatus(CALL_STATUS.IN_CALL);
+
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("Camera and microphone are not available in this browser.");
+      }
+
+      // Capacitor WebViews support the standard getUserMedia Promise API.
+      const localStream =
+        localStreamRef.current ||
+        (await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true,
+        }));
+
+      localStreamRef.current = localStream;
+
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = localStream;
+      }
+
+      const connection = peerConnection.current || createPeerConnection();
+      const senderTrackIds = new Set(
+        connection
+          .getSenders()
+          .map((sender) => sender.track?.id)
+          .filter(Boolean),
+      );
+
+      localStream.getTracks().forEach((track) => {
+        if (!senderTrackIds.has(track.id)) {
+          connection.addTrack(track, localStream);
+        }
+      });
+
+      return connection;
+    })().finally(() => {
+      callStartPromiseRef.current = null;
+    });
+
+    return callStartPromiseRef.current;
+  }, [createPeerConnection]);
+
+  const flushPendingIceCandidates = useCallback(async () => {
+    if (!peerConnection.current?.remoteDescription) return;
+
+    const candidates = pendingIceCandidatesRef.current;
+    pendingIceCandidatesRef.current = [];
+
+    for (const candidate of candidates) {
+      await peerConnection.current.addIceCandidate(new RTCIceCandidate(candidate));
+    }
+  }, []);
+
   const initiateCall = useCallback(
     async (isCaller) => {
       try {
-        setPopupData(null);
-        setCallStatus(CALL_STATUS.IN_CALL);
+        const connection = await startMediaAndConnection();
 
-        // Capacitor WebViews support the standard getUserMedia Promise API.
-        const localStream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: true,
-        });
-
-        localStreamRef.current = localStream;
-
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = localStream;
-        }
-
-        const connection = peerConnection.current || createPeerConnection();
-
-        localStream.getTracks().forEach((track) => {
-          connection.addTrack(track, localStream);
-        });
-
-        if (isCaller) {
+        if (isCaller && !connection.localDescription) {
           const offer = await connection.createOffer();
           await connection.setLocalDescription(offer);
           socket?.emit("webrtc_offer", offer);
@@ -99,16 +148,12 @@ function VideoCall({ socket }) {
         cleanupCall();
       }
     },
-    [cleanupCall, createPeerConnection, socket],
+    [cleanupCall, socket, startMediaAndConnection],
   );
 
   const ensureReceiverConnection = useCallback(async () => {
-    if (!peerConnection.current) {
-      await initiateCall(false);
-    }
-
-    return peerConnection.current;
-  }, [initiateCall]);
+    return startMediaAndConnection();
+  }, [startMediaAndConnection]);
 
   useEffect(() => {
     if (!socket) return undefined;
@@ -121,8 +166,8 @@ function VideoCall({ socket }) {
       setCallStatus(CALL_STATUS.IDLE);
     };
 
-    const handleStartVideo = () => {
-      initiateCall(true);
+    const handleStartVideo = (data) => {
+      initiateCall(data?.initiatorId === userId);
     };
 
     const handleCancelCall = () => {
@@ -137,6 +182,7 @@ function VideoCall({ socket }) {
         const answer = await connection.createAnswer();
         await connection.setLocalDescription(answer);
         socket.emit("webrtc_answer", answer);
+        await flushPendingIceCandidates();
       } catch (error) {
         console.error("Failed to handle WebRTC offer:", error);
         cleanupCall();
@@ -150,6 +196,7 @@ function VideoCall({ socket }) {
         await peerConnection.current.setRemoteDescription(
           new RTCSessionDescription(answer),
         );
+        await flushPendingIceCandidates();
       } catch (error) {
         console.error("Failed to handle WebRTC answer:", error);
       }
@@ -157,11 +204,14 @@ function VideoCall({ socket }) {
 
     const handleIceCandidate = async (candidate) => {
       try {
-        if (!peerConnection.current || !candidate) return;
+        if (!candidate) return;
 
-        await peerConnection.current.addIceCandidate(
-          new RTCIceCandidate(candidate),
-        );
+        if (!peerConnection.current?.remoteDescription) {
+          pendingIceCandidatesRef.current.push(candidate);
+          return;
+        }
+
+        await peerConnection.current.addIceCandidate(new RTCIceCandidate(candidate));
       } catch (error) {
         console.error("Failed to add ICE candidate:", error);
       }
@@ -183,7 +233,14 @@ function VideoCall({ socket }) {
       socket.off("webrtc_ice_candidate", handleIceCandidate);
       cleanupCall();
     };
-  }, [cleanupCall, ensureReceiverConnection, initiateCall, socket]);
+  }, [
+    cleanupCall,
+    ensureReceiverConnection,
+    flushPendingIceCandidates,
+    initiateCall,
+    socket,
+    userId,
+  ]);
 
   const handleAccept = () => {
     setCallStatus(CALL_STATUS.WAITING);
@@ -193,6 +250,13 @@ function VideoCall({ socket }) {
   };
 
   const handleDecline = () => {
+    socket?.emit("decline_call", {
+      scheduleId: popupData?.scheduleId,
+    });
+    cleanupCall();
+  };
+
+  const handleEndCall = () => {
     socket?.emit("decline_call", {
       scheduleId: popupData?.scheduleId,
     });
@@ -241,7 +305,7 @@ function VideoCall({ socket }) {
             playsInline
             muted
           />
-          <button type="button" onClick={cleanupCall}>
+          <button type="button" onClick={handleEndCall}>
             End call
           </button>
         </section>

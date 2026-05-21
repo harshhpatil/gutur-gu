@@ -4,7 +4,7 @@ import User from "../models/User.model.js";
 // CREATE: Add a new alarm (e.g., "Lunch ke baad ki gutur gu")
 export const createSchedule = async (req, res) => {
   try {
-    const { title, time } = req.body;
+    const { title, time, timezone } = req.body;
     const userId = req.user._id;
 
     // First, verify the user is actually in a Couple
@@ -17,6 +17,7 @@ export const createSchedule = async (req, res) => {
       coupleId: user.coupleId,
       title,
       time, // Format: "HH:mm" (e.g., "14:30")
+      timezone: timezone || process.env.DEFAULT_TIMEZONE || "Asia/Kolkata",
       createdBy: userId,
     });
 
@@ -47,13 +48,18 @@ export const getCoupleSchedules = async (req, res) => {
 export const updateSchedule = async (req, res) => {
   try {
     const { id } = req.params;
-    const { title, time, isActive } = req.body;
+    const { title, time, timezone, isActive } = req.body;
     const user = await User.findById(req.user._id);
 
     // Verify the schedule belongs to their couple ID
     const schedule = await Schedule.findOneAndUpdate(
       { _id: id, coupleId: user.coupleId },
-      { title, time, isActive },
+      {
+        title,
+        time,
+        timezone: timezone || process.env.DEFAULT_TIMEZONE || "Asia/Kolkata",
+        isActive,
+      },
       { new: true } // Returns the updated document
     );
 

@@ -1,151 +1,151 @@
 import { Server } from "socket.io";
-import { createAdapter } from "@socket.io/redis-adapter";
-import { createClient } from "redis";
+import jwt from "jsonwebtoken";
+import Session from "../models/Session.model.js";
+import User from "../models/User.model.js";
 
-const allowedOrigins = [
-  process.env.CLIENT_URL,
-  process.env.FRONTEND_URL,
-  "http://localhost",
-  "http://127.0.0.1",
-  "http://localhost:5173",
-  "http://127.0.0.1:5173",
-  "capacitor://localhost",
-  "ionic://localhost",
-].filter(Boolean);
+const allowedOrigins = [process.env.CLIENT_URL, process.env.FRONTEND_URL].filter(Boolean);
 
-const pendingKey = (coupleId) => `pending_calls:${coupleId}`;
+const isAllowedOrigin = (origin) => {
+  if (!origin) return true;
 
-const createRedisBridge = async (io) => {
-  const redisUrl = process.env.REDIS_URL;
-  if (!redisUrl) return null;
+  if (allowedOrigins.includes(origin)) return true;
 
-  const pubClient = createClient({ url: redisUrl });
-  const subClient = pubClient.duplicate();
+  return (
+    origin.startsWith("http://localhost:") ||
+    origin.startsWith("http://127.0.0.1:") ||
+    origin === "http://localhost" ||
+    origin === "http://127.0.0.1" ||
+    origin === "capacitor://localhost" ||
+    origin === "ionic://localhost"
+  );
+};
 
+const parseCookies = (cookieHeader = "") =>
+  cookieHeader.split(";").reduce((cookies, cookie) => {
+    const separatorIndex = cookie.indexOf("=");
+    if (separatorIndex === -1) return cookies;
+
+    const key = cookie.slice(0, separatorIndex).trim();
+    const value = cookie.slice(separatorIndex + 1).trim();
+    if (key) {
+      cookies[key] = decodeURIComponent(value);
+    }
+
+    return cookies;
+  }, {});
+
+const authenticateSocket = async (socket, next) => {
   try {
-    await Promise.all([pubClient.connect(), subClient.connect()]);
-    io.adapter(createAdapter(pubClient, subClient));
-    console.log("Socket.IO Redis adapter enabled");
-    return { pubClient, subClient };
-  } catch (error) {
-    console.warn("Redis adapter unavailable, falling back to in-memory socket state", error.message);
-    await Promise.allSettled([pubClient.disconnect(), subClient.disconnect()]);
-    return null;
+    const cookies = parseCookies(socket.handshake.headers.cookie);
+    const token = cookies.accessToken;
+
+    if (!token) {
+      return next(new Error("unauthorized"));
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.userId);
+
+    if (!user || user.tokenVersion !== decoded.tokenVersion || !decoded.sessionId) {
+      return next(new Error("unauthorized"));
+    }
+
+    const session = await Session.findById(decoded.sessionId);
+    if (
+      !session ||
+      session.revoked ||
+      session.expiresAt <= new Date() ||
+      session.user.toString() !== user._id.toString()
+    ) {
+      return next(new Error("unauthorized"));
+    }
+
+    if (!user.coupleId) {
+      return next(new Error("pairing required"));
+    }
+
+    socket.user = user;
+    socket.coupleId = user.coupleId.toString();
+    return next();
+  } catch {
+    return next(new Error("unauthorized"));
   }
 };
 
-export const initializeSocket = async (httpServer) => {
+// webrtc signaling server initialization using socket.io
+export const initializeSocket = (httpServer) => {
+  // creating a new socket server instance
   const io = new Server(httpServer, {
     cors: {
-      origin: allowedOrigins.length > 0 ? allowedOrigins : true,
+      origin(origin, callback) {
+        if (isAllowedOrigin(origin)) {
+          return callback(null, true);
+        }
+
+        return callback(new Error("Not allowed by CORS"));
+      },
       credentials: true,
     },
   });
 
-  const redisBridge = await createRedisBridge(io);
+  const acceptedUsers = new Map(); // temporary storage
 
-  // In-memory fallback store to track who clicked "Accept"
-  const pendingCalls = new Map();
+  io.use(authenticateSocket);
 
-  const addPendingAcceptance = async (coupleId, userId) => {
-    if (redisBridge) {
-      const key = pendingKey(coupleId);
-      await redisBridge.pubClient.sAdd(key, userId);
-      await redisBridge.pubClient.expire(key, 30 * 60);
-      return redisBridge.pubClient.sCard(key);
-    }
-
-    if (!pendingCalls.has(coupleId)) {
-      pendingCalls.set(coupleId, new Set());
-    }
-
-    const callRoom = pendingCalls.get(coupleId);
-    callRoom.add(userId);
-    return callRoom.size;
-  };
-
-  const clearPendingAcceptances = async (coupleId) => {
-    if (redisBridge) {
-      await redisBridge.pubClient.del(pendingKey(coupleId));
-      return;
-    }
-
-    pendingCalls.delete(coupleId);
-  };
-
-  const removePendingAcceptance = async (coupleId, userId) => {
-    if (redisBridge) {
-      const key = pendingKey(coupleId);
-      await redisBridge.pubClient.sRem(key, userId);
-      return redisBridge.pubClient.sCard(key);
-    }
-
-    const callRoom = pendingCalls.get(coupleId);
-    if (!callRoom) return 0;
-
-    callRoom.delete(userId);
-    if (callRoom.size === 0) {
-      pendingCalls.delete(coupleId);
-    }
-
-    return callRoom.size;
-  };
-
+  // handleling socket connection
   io.on("connection", (socket) => {
-    // We pass these from the React frontend when connecting
-    const { userId, coupleId } = socket.handshake.query;
+    const userId = socket.user._id.toString();
+    const coupleId = socket.coupleId;
 
-    if (!userId || !coupleId) return socket.disconnect();
-
-    // 1. Join their private couple's room
+    // join private room
     socket.join(coupleId);
-    console.log(`User ${userId} joined room ${coupleId}`);
+    console.log(`User ${userId} joined ${coupleId}`);
 
-    // 2. Handle an "Accept" click
-    socket.on("accept_call", async () => {
-      const acceptedCount = await addPendingAcceptance(coupleId, userId);
+    // accept call
+    socket.on("accept_call", () => {
+      if (!acceptedUsers.has(coupleId)) {
+        acceptedUsers.set(coupleId, new Set());
+      }
 
-      // If size is 2, BOTH partners accepted!
-      if (acceptedCount === 2) {
-        io.to(coupleId).emit("start_video"); // Tell React to open the camera
-        await clearPendingAcceptances(coupleId); // Reset state
+      const users = acceptedUsers.get(coupleId);
+
+      users.add(userId);
+
+      // both accepted
+      if (users.size === 2) {
+        const [initiatorId] = users;
+        io.to(coupleId).emit("start_video", { initiatorId });
+        acceptedUsers.delete(coupleId);
       }
     });
 
-    // --- WebRTC Signaling Logic ---
+    // decline call
+    socket.on("decline_call", () => {
+      io.to(coupleId).emit("cancel_call");
 
-    // 1. Relay the Offer
+      acceptedUsers.delete(coupleId);
+    });
+
+
+    // WEBRTC SIGNALING
+
     socket.on("webrtc_offer", (offer) => {
       socket.to(coupleId).emit("webrtc_offer", offer);
     });
 
-    // 2. Relay the Answer
     socket.on("webrtc_answer", (answer) => {
       socket.to(coupleId).emit("webrtc_answer", answer);
     });
 
-    // 3. Relay the ICE Candidates (Network routing info)
     socket.on("webrtc_ice_candidate", (candidate) => {
       socket.to(coupleId).emit("webrtc_ice_candidate", candidate);
     });
 
-    // 3. Handle a "Decline" click
-    socket.on("decline_call", async () => {
-      // If one person declines, cancel the call for both
-      io.to(coupleId).emit("cancel_call");
-      await clearPendingAcceptances(coupleId);
-    });
-
-    socket.on("disconnect", async () => {
+    // handeling disconnection
+    socket.on("disconnect", () => {
       console.log(`User ${userId} disconnected`);
-
-      const remainingCount = await removePendingAcceptance(coupleId, userId);
-
-      // If remaining participants < 2, cancel the pending call
-      if (remainingCount < 2) {
-        io.to(coupleId).emit("cancel_call");
-        await clearPendingAcceptances(coupleId);
-      }
+      acceptedUsers.delete(coupleId);
+      io.to(coupleId).emit("cancel_call");
     });
   });
 

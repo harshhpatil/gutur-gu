@@ -13,22 +13,28 @@ app.use(express.json());
 app.use(cookieParser());
 app.set("trust proxy", 1);
 
-const allowedOrigins = [
-  process.env.CLIENT_URL,
-  process.env.FRONTEND_URL,
-  "http://localhost",
-  "http://127.0.0.1",
-  "http://localhost:5173",
-  "http://127.0.0.1:5173",
-  "capacitor://localhost",
-  "ionic://localhost",
-].filter(Boolean);
+const allowedOrigins = [process.env.CLIENT_URL, process.env.FRONTEND_URL].filter(Boolean);
+
+const isAllowedOrigin = (origin) => {
+  if (!origin) return true;
+
+  if (allowedOrigins.includes(origin)) return true;
+
+  return (
+    origin.startsWith("http://localhost:") ||
+    origin.startsWith("http://127.0.0.1:") ||
+    origin === "http://localhost" ||
+    origin === "http://127.0.0.1" ||
+    origin === "capacitor://localhost" ||
+    origin === "ionic://localhost"
+  );
+};
 
 // CORS - allow browser and Capacitor clients to send requests and cookies
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin || allowedOrigins.includes(origin)) {
+      if (isAllowedOrigin(origin)) {
         return callback(null, true);
       }
 

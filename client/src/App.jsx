@@ -15,11 +15,20 @@ const defaultScheduleForm = {
   time: "09:00",
 };
 
+const getClientTimezone = () =>
+  Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Kolkata";
+
 const getInitialMode = () => {
   const params = new URLSearchParams(window.location.search);
-  return params.has("token") && window.location.pathname.includes("reset-password")
-    ? "reset"
-    : "login";
+  if (params.has("token") && window.location.pathname.includes("reset-password")) {
+    return "reset";
+  }
+
+  if (window.location.pathname.includes("verify-email")) {
+    return "verify";
+  }
+
+  return "login";
 };
 
 const formatApiError = (error) =>
@@ -90,6 +99,7 @@ function App() {
 
   const activeSchedules = schedules.filter((schedule) => schedule.isActive);
   const nextSchedule = activeSchedules[0];
+  const isPaired = Boolean(currentUser?.coupleId);
 
   const clearMessages = () => {
     setError("");
@@ -133,6 +143,55 @@ function App() {
   }, [loadAppData]);
 
   useEffect(() => {
+    if (authMode !== "verify") return;
+
+    let ignore = false;
+    const verifyTimer = window.setTimeout(() => {
+      const params = new URLSearchParams(window.location.search);
+      const token = params.get("token");
+      const message = params.get("message");
+
+      if (message && !token) {
+        setStatus(message);
+        return;
+      }
+
+      if (!token) {
+        setError("Verification token is missing from the URL.");
+        return;
+      }
+
+      const verifyEmail = async () => {
+        setError("");
+        setStatus("");
+
+        try {
+          const data = await apiRequest(
+            `/auth/verify-email?token=${encodeURIComponent(token)}`,
+            { method: "GET" },
+            false,
+          );
+
+          if (!ignore) {
+            setStatus(data.message || "Email verified successfully. You can now login.");
+          }
+        } catch (err) {
+          if (!ignore) {
+            setError(formatApiError(err));
+          }
+        }
+      };
+
+      verifyEmail();
+    }, 0);
+
+    return () => {
+      ignore = true;
+      window.clearTimeout(verifyTimer);
+    };
+  }, [authMode]);
+
+  useEffect(() => {
     let nextSocket;
     const connectTimer = window.setTimeout(() => {
       if (!isAuthenticated || !currentUser?.id || !currentUser?.coupleId) {
@@ -144,10 +203,6 @@ function App() {
       setSocketStatus("connecting");
 
       nextSocket = io(SOCKET_URL, {
-        query: {
-          userId: currentUser.id,
-          coupleId: currentUser.coupleId,
-        },
         transports: ["websocket", "polling"],
         withCredentials: true,
       });
@@ -171,6 +226,11 @@ function App() {
   const handleAuthSubmit = async (event) => {
     event.preventDefault();
     clearMessages();
+
+    if (authMode === "verify") {
+      setAuthMode("login");
+      return;
+    }
 
     if (authMode === "register" && authForm.password !== authForm.confirmPassword) {
       setError("Passwords do not match.");
@@ -245,6 +305,11 @@ function App() {
 
   const createPairingCode = async () => {
     clearMessages();
+    if (isPaired) {
+      setStatus("You are already paired.");
+      return;
+    }
+
     try {
       const data = await apiRequest("/pairing/create", { method: "POST" });
       setPairingCode(data.pairingCode);
@@ -257,6 +322,11 @@ function App() {
   const submitPairingCode = async (event) => {
     event.preventDefault();
     clearMessages();
+    if (isPaired) {
+      setStatus("You are already paired.");
+      return;
+    }
+
     try {
       const data = await apiRequest("/pairing/submit", {
         method: "POST",
@@ -273,6 +343,12 @@ function App() {
   const saveSchedule = async (event) => {
     event.preventDefault();
     clearMessages();
+    if (!isPaired) {
+      setError("Pair with your partner before creating reminders.");
+      setActiveView("pair");
+      return;
+    }
+
     try {
       if (editingId) {
         const current = schedules.find((schedule) => schedule._id === editingId);
@@ -280,6 +356,7 @@ function App() {
           method: "PUT",
           body: JSON.stringify({
             ...scheduleForm,
+            timezone: current?.timezone || getClientTimezone(),
             isActive: current?.isActive ?? true,
           }),
         });
@@ -291,7 +368,10 @@ function App() {
       } else {
         const data = await apiRequest("/schedule", {
           method: "POST",
-          body: JSON.stringify(scheduleForm),
+          body: JSON.stringify({
+            ...scheduleForm,
+            timezone: getClientTimezone(),
+          }),
         });
         setSchedules((items) => [...items, data.schedule].sort((a, b) => a.time.localeCompare(b.time)));
         setStatus("Reminder added.");
@@ -310,12 +390,19 @@ function App() {
 
   const toggleSchedule = async (schedule) => {
     clearMessages();
+    if (!isPaired) {
+      setError("Pair with your partner before managing reminders.");
+      setActiveView("pair");
+      return;
+    }
+
     try {
       const data = await apiRequest(`/schedule/${schedule._id}`, {
         method: "PUT",
         body: JSON.stringify({
           title: schedule.title,
           time: schedule.time,
+          timezone: schedule.timezone || getClientTimezone(),
           isActive: !schedule.isActive,
         }),
       });
@@ -329,6 +416,12 @@ function App() {
 
   const deleteSchedule = async (scheduleId) => {
     clearMessages();
+    if (!isPaired) {
+      setError("Pair with your partner before managing reminders.");
+      setActiveView("pair");
+      return;
+    }
+
     try {
       await apiRequest(`/schedule/${scheduleId}`, { method: "DELETE" });
       setSchedules((items) => items.filter((item) => item._id !== scheduleId));
@@ -349,7 +442,13 @@ function App() {
       setStatus(data.message);
       setAccountForm({ oldPassword: "", newPassword: "" });
       setIsAuthenticated(false);
+      setCurrentUser(null);
+      socket?.disconnect();
+      setSocket(null);
+      setSocketStatus("offline");
       setAuthMode("login");
+      setSchedules([]);
+      setSessions([]);
     } catch (err) {
       setError(formatApiError(err));
     }
@@ -417,12 +516,15 @@ function App() {
 
           <form className="stack-form" onSubmit={handleAuthSubmit}>
             <div>
-              <p className="eyebrow">{authMode === "forgot" ? "Recover" : "Welcome"}</p>
+              <p className="eyebrow">
+                {authMode === "forgot" ? "Recover" : authMode === "verify" ? "Verify" : "Welcome"}
+              </p>
               <h2>
                 {authMode === "register" && "Create your account"}
                 {authMode === "login" && "Sign in to your space"}
                 {authMode === "forgot" && "Reset your password"}
                 {authMode === "reset" && "Choose a new password"}
+                {authMode === "verify" && "Email verification"}
               </h2>
             </div>
 
@@ -440,7 +542,7 @@ function App() {
               </label>
             )}
 
-            {authMode !== "reset" && (
+            {authMode !== "reset" && authMode !== "verify" && (
               <label>
                 Email
                 <input
@@ -455,7 +557,7 @@ function App() {
               </label>
             )}
 
-            {authMode !== "forgot" && (
+            {authMode !== "forgot" && authMode !== "verify" && (
               <label>
                 Password
                 <input
@@ -493,14 +595,15 @@ function App() {
               {authMode === "login" && "Login"}
               {authMode === "forgot" && "Send reset link"}
               {authMode === "reset" && "Update password"}
+              {authMode === "verify" && "Continue"}
             </button>
 
             <button
               className="text-button"
               type="button"
-              onClick={() => setAuthMode(authMode === "forgot" ? "login" : "forgot")}
+              onClick={() => setAuthMode(authMode === "forgot" || authMode === "verify" ? "login" : "forgot")}
             >
-              {authMode === "forgot" ? "Back to login" : "Forgot password?"}
+              {authMode === "forgot" || authMode === "verify" ? "Back to login" : "Forgot password?"}
             </button>
           </form>
         </section>
@@ -544,7 +647,7 @@ function App() {
           </div>
           <div className="topbar-actions">
             <div className={`socket-pill ${socketStatus}`}>
-              {currentUser?.coupleId ? `Live ${socketStatus}` : "Pair to enable live calls"}
+              {isPaired ? `Live ${socketStatus}` : "Pair to enable live calls"}
             </div>
             <div className="next-chip">
               <span>Next</span>
@@ -622,8 +725,12 @@ function App() {
               </div>
               {schedules.length === 0 ? (
                 <div className="empty-state">
-                  <h3>No reminders yet</h3>
-                  <p>Create your first shared reminder after pairing with your partner.</p>
+                  <h3>{isPaired ? "No reminders yet" : "Pairing needed"}</h3>
+                  <p>
+                    {isPaired
+                      ? "Create your first shared reminder."
+                      : "Pair with your partner before creating shared reminders."}
+                  </p>
                 </div>
               ) : (
                 <div className="reminder-list">
@@ -662,9 +769,10 @@ function App() {
                 Share the 6 digit code with your partner. They can join from their own account.
               </p>
               <button className="primary-button" onClick={createPairingCode} type="button">
-                Generate code
+                {isPaired ? "Already paired" : "Generate code"}
               </button>
-              {pairingCode && <div className="pairing-code">{pairingCode}</div>}
+              {isPaired && <p className="notice success">Your account is connected to your partner.</p>}
+              {!isPaired && pairingCode && <div className="pairing-code">{pairingCode}</div>}
             </section>
 
             <section className="panel">
@@ -679,11 +787,12 @@ function App() {
                     value={joinCode}
                     onChange={(event) => setJoinCode(event.target.value.replace(/\D/g, ""))}
                     placeholder="492015"
+                    disabled={isPaired}
                     required
                   />
                 </label>
                 <button className="primary-button" type="submit">
-                  Pair accounts
+                  {isPaired ? "Already paired" : "Pair accounts"}
                 </button>
               </form>
             </section>
@@ -773,7 +882,7 @@ function App() {
           </button>
         ))}
       </nav>
-      <VideoCall socket={socket} />
+      <VideoCall socket={socket} userId={currentUser?.id} />
     </main>
   );
 }

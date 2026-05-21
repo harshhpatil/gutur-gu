@@ -1,36 +1,55 @@
 import cron from "node-cron";
 import Schedule from "../models/Schedule.model.js";
 
+const DEFAULT_TIMEZONE = process.env.DEFAULT_TIMEZONE || "Asia/Kolkata";
+
+const getTimeForTimezone = (date, timezone) => {
+  try {
+    return new Intl.DateTimeFormat("en-GB", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+      timeZone: timezone || DEFAULT_TIMEZONE,
+    }).format(date);
+  } catch {
+    return new Intl.DateTimeFormat("en-GB", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+      timeZone: DEFAULT_TIMEZONE,
+    }).format(date);
+  }
+};
+
 export const initializeCronJobs = (io) => {
   // This cron expression '* * * * *' means "run at the start of every minute"
   cron.schedule("* * * * *", async () => {
     try {
-      // 1. Get the current time in "HH:mm" format (e.g., "14:30")
       const now = new Date();
-      const currentHours = String(now.getHours()).padStart(2, "0");
-      const currentMinutes = String(now.getMinutes()).padStart(2, "0");
-      const currentTime = `${currentHours}:${currentMinutes}`;
 
-      console.log(`Checking schedules for time: ${currentTime}`);
+      console.log("Checking active schedules for reminder triggers");
 
-      // 2. Find all active alarms that match this exact minute
-      const activeAlarms = await Schedule.find({
-        time: currentTime,
+      const activeSchedules = await Schedule.find({
         isActive: true,
       });
 
-      if (activeAlarms.length === 0) return;
+      const dueSchedules = activeSchedules.filter((schedule) => {
+        const scheduleTimezone = schedule.timezone || DEFAULT_TIMEZONE;
+        return schedule.time === getTimeForTimezone(now, scheduleTimezone);
+      });
 
-      // 3. Loop through the matched alarms and trigger the socket events
-      activeAlarms.forEach((alarm) => {
+      if (dueSchedules.length === 0) return;
+
+      dueSchedules.forEach((alarm) => {
         const coupleRoomId = alarm.coupleId.toString();
         
-        console.log(`Triggering "${alarm.title}" for couple ${coupleRoomId}`);
+        console.log(
+          `Triggering "${alarm.title}" for couple ${coupleRoomId} at ${alarm.time} ${alarm.timezone || DEFAULT_TIMEZONE}`,
+        );
 
-        // Emit the pop-up event specifically to this couple's private room
         io.to(coupleRoomId).emit("trigger_popup", {
           title: alarm.title,
-          scheduleId: alarm._id,
+          scheduleId: alarm._id.toString(),
         });
       });
       
